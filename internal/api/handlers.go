@@ -17,6 +17,11 @@ func PutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Key == "" {
+		http.Error(w, "empty key", http.StatusBadRequest)
+		return
+	}
+
 	store.Put(req.Key, req.Value)
 
 	resp := models.PutResponse{Success: true}
@@ -46,6 +51,11 @@ func DeleteHandler(w http.ResponseWriter, r *http.Request) {
 	var req models.DeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Key == "" {
+		http.Error(w, "empty key", http.StatusBadRequest)
 		return
 	}
 

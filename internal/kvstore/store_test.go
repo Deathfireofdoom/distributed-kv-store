@@ -55,3 +55,31 @@ func TestStore(t *testing.T) {
 		})
 	}
 }
+
+func TestNewStore_Singleton(t *testing.T) {
+	store1 := NewStore()
+	store2 := NewStore()
+
+	if store1 != store2 {
+		t.Fatalf("expected store1 and store2 to be the same instance")
+	}
+
+	store1.Put("key1", "value1")
+	value, ok := store2.Get("key1")
+	if !ok {
+		t.Fatalf("expected to find key1 in store2")
+	}
+	if value != "value1" {
+		t.Fatalf("expected value1, got %s", value)
+	}
+
+	store2.Delete("key1")
+	_, ok = store1.Get("key1")
+	if ok {
+		t.Fatalf("did not expect to find key1 after deletion in store2")
+	}
+
+	store1.mu.Lock()
+	store1.data = make(map[string]string)
+	store1.mu.Unlock()
+}

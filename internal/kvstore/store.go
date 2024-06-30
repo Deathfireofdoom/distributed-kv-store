@@ -1,6 +1,10 @@
 package kvstore
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/Deathfireofdoom/distributed-kv-store/internal/raft"
+)
 
 type Store struct {
 	mu   sync.Mutex
@@ -36,4 +40,13 @@ func (s *Store) Delete(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.data, key)
+}
+
+func (s *Store) Apply(command raft.Command) {
+	switch command.Type {
+	case raft.PutCommand:
+		s.Put(command.Key, command.Value)
+	case raft.DeleteCommand:
+		s.Delete(command.Key)
+	}
 }

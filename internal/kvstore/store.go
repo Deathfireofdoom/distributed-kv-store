@@ -1,6 +1,10 @@
 package kvstore
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/Deathfireofdoom/distributed-kv-store/internal/models"
+)
 
 type Store struct {
 	mu   sync.Mutex
@@ -36,4 +40,13 @@ func (s *Store) Delete(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.data, key)
+}
+
+func (s *Store) Apply(command models.Command) {
+	switch command.Type {
+	case models.PutCommand:
+		s.Put(command.Key, command.Value)
+	case models.DeleteCommand:
+		s.Delete(command.Key)
+	}
 }

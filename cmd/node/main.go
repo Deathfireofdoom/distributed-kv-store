@@ -32,7 +32,7 @@ func main() {
 		}
 	}()
 
-	router := api.NewRouter()
+	router := api.NewRouter(raftNode)
 	log.Println("Starting server")
 	httpAddress := fmt.Sprintf(":%d", httpPort)
 	if err := http.ListenAndServe(httpAddress, router); err != nil {

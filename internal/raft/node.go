@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Deathfireofdoom/distributed-kv-store/internal/kvstore"
 	"github.com/Deathfireofdoom/distributed-kv-store/internal/models"
 	"github.com/Deathfireofdoom/distributed-kv-store/internal/proto"
 	"google.golang.org/grpc"
@@ -24,27 +25,29 @@ type RaftNode struct {
 	id          string
 	term        int32
 	votedFor    string
-	log         []LogEntry
+	log         []models.LogEntry
 	commitIndex int32
 	lastApplied int32
 	nextIndex   map[string]int32
 	matchIndex  map[string]int32
-	fsm         StateMachine
+	fsm         models.StateMachine
 	peers       []string
 	isLeader    bool
 	votes       int32
 	heartbeatCh chan bool
 }
 
-func NewRaftNode(id string, peers []string, fsm StateMachine) *RaftNode {
+func NewRaftNode(id string, peers []string, fsm models.StateMachine) *RaftNode {
 	node := &RaftNode{
 		id:          id,
-		log:         make([]LogEntry, 0),
+		log:         make([]models.LogEntry, 0),
 		nextIndex:   make(map[string]int32),
 		matchIndex:  make(map[string]int32),
 		fsm:         fsm,
 		peers:       peers,
 		heartbeatCh: make(chan bool),
+		lastApplied: -1,
+		commitIndex: -1,
 	}
 	go node.startElectionTimer()
 	return node
@@ -60,22 +63,26 @@ func (node *RaftNode) StartGRPCServer(port string) error {
 	return server.Serve(lis)
 }
 
+func (node *RaftNode) GetStore() *kvstore.Store {
+	return node.fsm.(*kvstore.Store)
+}
+
 // local method - Invoked by client sending the http request
-func (node *RaftNode) PutHanlder(w http.ResponseWriter, r *http.Request) {
+func (node *RaftNode) PutHandler(w http.ResponseWriter, r *http.Request) {
 	var req models.PutRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
 
-	command := Command{
-		Type:  PutCommand,
+	command := models.Command{
+		Type:  models.PutCommand,
 		Key:   req.Key,
 		Value: req.Value,
 	}
 
 	data, _ := json.Marshal(command)
-	entry := LogEntry{
+	entry := models.LogEntry{
 		Term:    node.term,
 		Command: string(data),
 	}
@@ -94,8 +101,9 @@ func (node *RaftNode) PutHanlder(w http.ResponseWriter, r *http.Request) {
 		node.applyLogEntries()
 		node.mu.Unlock()
 
-		// asking the nodes to commit, update their kv store with the logs
-		go node.notifyCommit()
+		// asking the nodes to commit, update their kv store with the logs - this is done
+		// by sending a empty AppendRequest with a updated commit log.
+		go node.sendHeartBeats()
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(models.PutResponse{Success: true})
@@ -104,12 +112,75 @@ func (node *RaftNode) PutHanlder(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (node *RaftNode) replicateLogEntry(entry LogEntry) bool {
-	panic("implement")
-}
+func (node *RaftNode) replicateLogEntry(entry models.LogEntry) bool {
+	var wg sync.WaitGroup
+	successCount := 1
+	majority := len(node.peers)/2 + 1
+	successCh := make(chan bool, len(node.peers))
 
-func (node *RaftNode) notifyCommit() {
-	panic("implement")
+	for _, peer := range node.peers {
+		wg.Add(1)
+		go func(peer string) {
+			defer wg.Done()
+
+			conn, err := grpc.NewClient(peer, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				successCh <- false
+				return
+			}
+			defer conn.Close()
+
+			client := proto.NewRaftServiceClient(conn)
+
+			var prevLogIndex int32
+			var prevLogTerm int32
+
+			// Handle empty or nearly empty log cases
+			if len(node.log) > 1 {
+				prevLogIndex = int32(len(node.log) - 2)
+				prevLogTerm = node.log[prevLogIndex].Term
+			} else {
+				prevLogIndex = -1
+				prevLogTerm = 0
+			}
+
+			req := &proto.AppendEntriesRequest{
+				Term:         node.term,
+				LeaderId:     node.id,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
+				Entries:      convertToProtoEntries([]models.LogEntry{entry}),
+				LeaderCommit: node.commitIndex,
+			}
+
+			resp, err := client.AppendEntries(context.Background(), req)
+			if err != nil {
+				successCh <- false
+				return
+			}
+
+			if !resp.Success {
+				successCh <- false
+				return
+			}
+
+			successCh <- true
+		}(peer)
+	}
+
+	wg.Wait()
+	close(successCh)
+
+	for success := range successCh {
+		if success {
+			successCount++
+		}
+
+		if successCount >= majority {
+			return true
+		}
+	}
+	return false
 }
 
 // RAFT METHODS - HEART BEATS
@@ -251,7 +322,7 @@ func (node *RaftNode) requestVoteFromPeer(peer string) {
 
 // gRPC Method - invoked by other node
 func (node *RaftNode) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error) {
-	log.Printf("%s got a entry: %v", node.id, req)
+	log.Printf("%s got a entry: %d", node.id, req.LeaderCommit)
 	node.mu.Lock()
 	defer node.mu.Unlock()
 
@@ -284,11 +355,13 @@ func (node *RaftNode) AppendEntries(ctx context.Context, req *proto.AppendEntrie
 	// Desc:	If the prevLog is not populated in the node
 	//			or it has another term number, then something
 	//			is off and can't accept the entry.
-	if len(node.log) < int(req.PrevLogIndex)+1 || node.log[req.PrevLogIndex].Term != req.PrevLogTerm {
-		return &proto.AppendEntriesResponse{
-			Term:    node.term,
-			Success: false,
-		}, nil
+	if req.PrevLogIndex >= 0 {
+		if len(node.log) < int(req.PrevLogIndex)+1 || node.log[req.PrevLogIndex].Term != req.PrevLogTerm {
+			return &proto.AppendEntriesResponse{
+				Term:    node.term,
+				Success: false,
+			}, nil
+		}
 	}
 
 	// Purpose: Add the new logs to the node log
@@ -368,16 +441,16 @@ func (node *RaftNode) applyLogEntries() {
 	for node.lastApplied < node.commitIndex {
 		node.lastApplied++
 		entry := node.log[node.lastApplied]
-		var command Command
+		var command models.Command
 		json.Unmarshal([]byte(entry.Command), &command)
 		node.fsm.Apply(command)
 	}
 }
 
-func convertProtoEntries(entries []*proto.LogEntry) []LogEntry {
-	logEntries := make([]LogEntry, len(entries))
+func convertProtoEntries(entries []*proto.LogEntry) []models.LogEntry {
+	logEntries := make([]models.LogEntry, len(entries))
 	for i, entry := range entries {
-		logEntries[i] = LogEntry{
+		logEntries[i] = models.LogEntry{
 			Term:    entry.Term,
 			Command: entry.Command,
 		}
@@ -385,7 +458,7 @@ func convertProtoEntries(entries []*proto.LogEntry) []LogEntry {
 	return logEntries
 }
 
-func convertToProtoEntries(entries []LogEntry) []*proto.LogEntry {
+func convertToProtoEntries(entries []models.LogEntry) []*proto.LogEntry {
 	protoEntries := make([]*proto.LogEntry, len(entries))
 	for i, entry := range entries {
 		protoEntries[i] = &proto.LogEntry{

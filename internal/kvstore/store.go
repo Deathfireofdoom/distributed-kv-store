@@ -3,7 +3,7 @@ package kvstore
 import (
 	"sync"
 
-	"github.com/Deathfireofdoom/distributed-kv-store/internal/raft"
+	"github.com/Deathfireofdoom/distributed-kv-store/internal/models"
 )
 
 type Store struct {
@@ -42,11 +42,11 @@ func (s *Store) Delete(key string) {
 	delete(s.data, key)
 }
 
-func (s *Store) Apply(command raft.Command) {
+func (s *Store) Apply(command models.Command) {
 	switch command.Type {
-	case raft.PutCommand:
+	case models.PutCommand:
 		s.Put(command.Key, command.Value)
-	case raft.DeleteCommand:
+	case models.DeleteCommand:
 		s.Delete(command.Key)
 	}
 }

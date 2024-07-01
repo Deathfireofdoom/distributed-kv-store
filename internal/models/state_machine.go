@@ -1,4 +1,4 @@
-package raft
+package models
 
 type CommandType int
 

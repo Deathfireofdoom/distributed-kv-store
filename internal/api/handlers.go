@@ -9,7 +9,7 @@ import (
 	"github.com/Deathfireofdoom/distributed-kv-store/internal/raft"
 )
 
-func PutHandler(w http.ResponseWriter, r *http.Request, node *raft.RaftNode) {
+func PutHandler(w http.ResponseWriter, r *http.Request, node *raft.RaftNode) { 
 	node.PutHandler(w, r)
 }
 

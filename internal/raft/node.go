@@ -69,6 +69,11 @@ func (node *RaftNode) GetStore() *kvstore.Store {
 
 // local method - Invoked by client sending the http request
 func (node *RaftNode) PutHandler(w http.ResponseWriter, r *http.Request) {
+	if !node.isLeader {
+		http.Error(w, "node is not leader", http.StatusBadRequest)
+		return
+	}
+
 	var req models.PutRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -115,7 +120,7 @@ func (node *RaftNode) PutHandler(w http.ResponseWriter, r *http.Request) {
 func (node *RaftNode) replicateLogEntry(entry models.LogEntry) bool {
 	var wg sync.WaitGroup
 	successCount := 1
-	majority := len(node.peers)/2 + 1
+	majority := len(node.peers)/2 + 1 // This needs to be dynamic, otherwise, we wont get majority
 	successCh := make(chan bool, len(node.peers))
 
 	for _, peer := range node.peers {
@@ -226,7 +231,52 @@ func (node *RaftNode) sendHeartbeatToPeer(peer string) {
 		LeaderCommit: node.commitIndex,
 	}
 
-	client.AppendEntries(context.Background(), req)
+	resp, err := client.AppendEntries(context.Background(), req)
+	if err != nil {
+		log.Printf("Failed to send heartbeat to %s: %v", peer, err)
+		return
+	}
+
+	if !resp.Success {
+		log.Printf("Heartbeat rejected by %s, initiating backfill", peer)
+		node.handleBackfill(peer, client)
+	} else {
+		log.Printf("Heartbeat accepted by %s", peer)
+	}
+}
+
+func (node *RaftNode) handleBackfill(peer string, client proto.RaftServiceClient) {
+	nextIndex := int32(len(node.log))
+
+	for nextIndex >= 0 {
+		var prevLogTerm int32
+		if nextIndex == 0 {
+			prevLogTerm = -1
+		} else {
+			prevLogTerm = node.log[nextIndex-1].Term
+		}
+
+		req := &proto.AppendEntriesRequest{
+			Term:         node.term,
+			LeaderId:     node.id,
+			PrevLogIndex: nextIndex - 1,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      convertToProtoEntries(node.log[nextIndex:]),
+			LeaderCommit: node.commitIndex,
+		}
+
+		resp, err := client.AppendEntries(context.Background(), req)
+		if err != nil {
+			log.Printf("Error during backfill to %s: %v", peer, err)
+			return
+		}
+		if resp.Success {
+			log.Printf("Backfill successful to %s up to index %d", peer, nextIndex)
+			node.nextIndex[peer] = int32(len(node.log))
+			break
+		}
+		nextIndex--
+	}
 }
 
 // RAFT METHODS - Leader election
@@ -238,9 +288,6 @@ func (node *RaftNode) startElectionTimer() {
 		// the timeout has a base-timeout, and a random addition so
 		// not all nodes timeout at the same time causing a stampeede.
 		timeout := 10*time.Second + time.Duration(rand.Intn(30))*time.Second
-		if node.id == "node1" {
-			timeout = 1 * time.Second
-		}
 		timer := time.NewTimer(timeout)
 
 		select {
@@ -337,13 +384,6 @@ func (node *RaftNode) AppendEntries(ctx context.Context, req *proto.AppendEntrie
 		}, nil
 	}
 
-	// Purpose: Recognize the authority of the sender.
-	// Desc: 	Updating the current node to reflect that
-	//			it accepts the sender as the leader.
-	node.term = req.Term
-	node.votedFor = req.LeaderId
-	node.isLeader = false
-
 	// Purpose: Reseting timer for leader election
 	// Desc:	This means we got a heartbeat from the leader,
 	//			so we need to reset the heartbeat timer.
@@ -358,12 +398,20 @@ func (node *RaftNode) AppendEntries(ctx context.Context, req *proto.AppendEntrie
 	//			is off and can't accept the entry.
 	if req.PrevLogIndex >= 0 {
 		if len(node.log) < int(req.PrevLogIndex)+1 || node.log[req.PrevLogIndex].Term != req.PrevLogTerm {
+			log.Printf("We are here %v", req)
 			return &proto.AppendEntriesResponse{
 				Term:    node.term,
 				Success: false,
 			}, nil
 		}
 	}
+
+	// Purpose: Recognize the authority of the sender.
+	// Desc: 	Updating the current node to reflect that
+	//			it accepts the sender as the leader.
+	node.term = req.Term
+	node.votedFor = req.LeaderId
+	node.isLeader = false
 
 	// Purpose: Add the new logs to the node log
 	// Desc:	Since we accepted the logs we also need to add them to

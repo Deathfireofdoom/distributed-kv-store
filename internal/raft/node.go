@@ -306,6 +306,7 @@ func (node *RaftNode) requestVoteFromPeer(peer string) {
 	resp, err := client.RequestVote(context.Background(), req)
 	if err != nil {
 		log.Printf("failed to request vote from peer %s: %v", peer, err)
+		return
 	}
 
 	log.Printf("%s got this response from peer %s: %v", node.id, peer, resp)

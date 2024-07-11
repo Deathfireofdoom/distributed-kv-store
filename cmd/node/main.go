@@ -17,7 +17,7 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	nodeID := cfg.NodeID
+	nodeID := fmt.Sprintf("localhost:%d", cfg.HTTPPort)
 	httpPort := cfg.HTTPPort
 	grpcPort := cfg.GRPCPort
 	peers := cfg.Peers

@@ -21,33 +21,35 @@ import (
 
 type RaftNode struct {
 	proto.UnimplementedRaftServiceServer
-	mu          sync.Mutex
-	id          string
-	term        int32
-	votedFor    string
-	log         []models.LogEntry
-	commitIndex int32
-	lastApplied int32
-	nextIndex   map[string]int32
-	matchIndex  map[string]int32
-	fsm         models.StateMachine
-	peers       []string
-	isLeader    bool
-	votes       int32
-	heartbeatCh chan bool
+	mu            sync.Mutex
+	id            string
+	term          int32
+	votedFor      string
+	log           []models.LogEntry
+	commitIndex   int32
+	lastApplied   int32
+	nextIndex     map[string]int32
+	matchIndex    map[string]int32
+	fsm           models.StateMachine
+	peers         []string
+	isLeader      bool
+	leaderAddress string
+	votes         int32
+	heartbeatCh   chan bool
 }
 
 func NewRaftNode(id string, peers []string, fsm models.StateMachine) *RaftNode {
 	node := &RaftNode{
-		id:          id,
-		log:         make([]models.LogEntry, 0),
-		nextIndex:   make(map[string]int32),
-		matchIndex:  make(map[string]int32),
-		fsm:         fsm,
-		peers:       peers,
-		heartbeatCh: make(chan bool),
-		lastApplied: -1,
-		commitIndex: -1,
+		id:            id,
+		log:           make([]models.LogEntry, 0),
+		nextIndex:     make(map[string]int32),
+		matchIndex:    make(map[string]int32),
+		fsm:           fsm,
+		peers:         peers,
+		heartbeatCh:   make(chan bool),
+		lastApplied:   -1,
+		commitIndex:   -1,
+		leaderAddress: "",
 	}
 	go node.startElectionTimer()
 	return node
@@ -70,8 +72,15 @@ func (node *RaftNode) GetStore() *kvstore.Store {
 // local method - Invoked by client sending the http request
 func (node *RaftNode) PutHandler(w http.ResponseWriter, r *http.Request) {
 	if !node.isLeader {
-		http.Error(w, "node is not leader", http.StatusBadRequest)
-		return
+		if node.leaderAddress != "" {
+			redirectURL := "http://" + node.leaderAddress + r.URL.Path
+			log.Println(redirectURL)
+			http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+			return
+		} else {
+			http.Error(w, "could not find a leader", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	var req models.PutRequest
@@ -398,7 +407,6 @@ func (node *RaftNode) AppendEntries(ctx context.Context, req *proto.AppendEntrie
 	//			is off and can't accept the entry.
 	if req.PrevLogIndex >= 0 {
 		if len(node.log) < int(req.PrevLogIndex)+1 || node.log[req.PrevLogIndex].Term != req.PrevLogTerm {
-			log.Printf("We are here %v", req)
 			return &proto.AppendEntriesResponse{
 				Term:    node.term,
 				Success: false,
@@ -412,6 +420,7 @@ func (node *RaftNode) AppendEntries(ctx context.Context, req *proto.AppendEntrie
 	node.term = req.Term
 	node.votedFor = req.LeaderId
 	node.isLeader = false
+	node.leaderAddress = req.LeaderId
 
 	// Purpose: Add the new logs to the node log
 	// Desc:	Since we accepted the logs we also need to add them to

@@ -6,6 +6,4 @@ The idea is to implement a distributed kv-store, using RAFT consensus algorithm,
 
 ## Dev notes
 
-* Fix so the service does not panic when the grpc is not answering
-* Fix so a node can come back after failure
 * Fix so only leader accepts read/writes, maybe re-route otherwise?
